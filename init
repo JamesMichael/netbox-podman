@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+declare -r NAME="${NETBOX_NAME:-netbox}"
+declare -r PORT="${NETBOX_PORT:-1234}"
+
+# root of the netbox-docker repo, assumes this script is located in
+# netbox-docker/podman/setup
+declare -r _ROOT="$(dirname "$(dirname "$(readlink -f "$BASH_SOURCE")")")"
+
+# compared to docker-compose, all pods run on the same network stack
+# as we're running two redis instances, one of them needs to be on another port
+declare -r _REDIS_CACHE_PORT=6380
+
+source env/netbox.env
+
+podman pod create --name netbox -p $PORT:8080
+
+podman volume create ${NAME}_postgres_data || true
+podman volume create ${NAME}_redis_data    || true
+podman volume create ${NAME}_static_files  || true
+podman volume create ${NAME}_media_files   || true
+podman volume create ${NAME}_nginx_config  || true
+
+podman run \
+    --detach \
+    --env-file env/postgres.env \
+    --pod $NAME \
+    --restart always \
+    --mount type=volume,src=${NAME}_postgres_data,dst=/var/lib/postgresql/data \
+    --name ${NAME}_postgres \
+    postgres:11-alpine
+
+podman run \
+    --detach \
+    --env-file env/redis.env \
+    --pod $NAME \
+    --restart always \
+    --name ${NAME}_redis \
+    --mount type=volume,src=${NAME}_redis_data,dst=/data \
+    redis:5-alpine \
+    redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+
+podman run \
+    --detach \
+    --env-file env/redis-cache.env \
+    --pod $NAME \
+    --restart always \
+    --name ${NAME}_redis_cache \
+    redis:5-alpine \
+    redis-server --requirepass "$REDIS_CACHE_PASSWORD" --port "$_REDIS_CACHE_PORT"
+
+podman run \
+    --add-host postgres:127.0.0.1 \
+    --add-host redis:127.0.0.1 \
+    --add-host redis-cache:127.0.0.1 \
+    --detach \
+    --env-file env/netbox.env \
+    --env REDIS_CACHE_PORT="$_REDIS_CACHE_PORT" \
+    --pod $NAME \
+    --restart always \
+    --name ${NAME}_worker \
+    --mount type=bind,src="$_ROOT"/startup_scripts,dst=/opt/netbox/startup_scripts,relabel=shared,ro=true \
+    --mount type=bind,src="$_ROOT"/initializers,dst=/opt/netbox/initializers,relabel=shared,ro=true \
+    --mount type=bind,src="$_ROOT"/configuration,dst=/etc/netbox/config,relabel=shared,ro=true \
+    --mount type=bind,src="$_ROOT"/reports,dst=/etc/netbox/reports,relabel=shared,ro=true \
+    --mount type=bind,src="$_ROOT"/scripts,dst=/etc/netbox/scripts,relabel=shared,ro=true \
+    --mount type=volume,src=${NAME}_static_files,dst=/opt/netbox/netbox/static \
+    --mount type=volume,src=${NAME}_nginx_config,dst=/etc/netbox-nginx \
+    --mount type=volume,src=${NAME}_media_files,dst=/opt/netbox/netbox/media \
+    netboxcommunity/netbox:latest \
+    python3 /opt/netbox/netbox/manage.py rqworker
+
+podman run \
+    --add-host postgres:127.0.0.1 \
+    --add-host redis:127.0.0.1 \
+    --add-host redis-cache:127.0.0.1 \
+    --detach \
+    --env-file env/netbox.env \
+    --env REDIS_CACHE_PORT="$_REDIS_CACHE_PORT" \
+    --pod $NAME \
+    --restart always \
+    --name ${NAME}_netbox \
+    --mount type=bind,src="$_ROOT"/startup_scripts,dst=/opt/netbox/startup_scripts,relabel=shared,ro=true \
+    --mount type=bind,src="$_ROOT"/initializers,dst=/opt/netbox/initializers,relabel=shared,ro=true \
+    --mount type=bind,src="$_ROOT"/configuration,dst=/etc/netbox/config,relabel=shared,ro=true \
+    --mount type=bind,src="$_ROOT"/reports,dst=/etc/netbox/reports,relabel=shared,ro=true \
+    --mount type=bind,src="$_ROOT"/scripts,dst=/etc/netbox/scripts,relabel=shared,ro=true \
+    --mount type=volume,src=${NAME}_static_files,dst=/opt/netbox/netbox/static \
+    --mount type=volume,src=${NAME}_nginx_config,dst=/etc/netbox-nginx/ \
+    --mount type=volume,src=${NAME}_media_files,dst=/opt/netbox/netbox/media \
+    netboxcommunity/netbox:latest
+
+podman run \
+    --detach \
+    --pod netbox \
+    --restart always \
+    --name ${NAME}_nginx \
+    --mount type=volume,src=${NAME}_static_files,dst=/opt/netbox/netbox/static \
+    --mount type=volume,src=${NAME}_nginx_config,dst=/etc/netbox-nginx/,ro=true \
+    nginx:1.17-alpine \
+    nginx -c /etc/netbox-nginx/nginx.conf

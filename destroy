@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+declare -r NAME="${NETBOX_NAME:-netbox}"
+podman pod rm $NAME
+
+podman volume rm ${NAME}_postgres_data
+podman volume rm ${NAME}_redis_data
+podman volume rm ${NAME}_static_files
+podman volume rm ${NAME}_media_files
+podman volume rm ${NAME}_nginx_config

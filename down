@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+declare -r NAME="${NETBOX_NAME:-netbox}"
+podman pod stop "$NAME"
